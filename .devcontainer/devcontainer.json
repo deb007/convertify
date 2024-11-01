@@ -1,0 +1,17 @@
+{
+  "name": "Convertify - Converter",
+  "image": "mcr.microsoft.com/devcontainers/python:3.10",
+  "forwardPorts": [8000],
+  "postCreateCommand": "pip install -r requirements.txt",
+  "portsAttributes": {
+    "8000": {
+      "label": "Convertify",
+      "onAutoForward": "openPreview"
+    }
+  },
+  "customizations": {
+    "codespaces": {
+      "openFiles": ["README.md"]
+    }
+  }
+}
