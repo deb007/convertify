@@ -8,6 +8,8 @@ import docx
 from docx.document import Document
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
+import pdfplumber
+import re
 
 
 class DocumentReader(ABC):
@@ -78,6 +80,32 @@ class DocxReader(DocumentReader):
             raise Exception(f"Error reading DOCX file: {str(e)}")
 
 
+class PdfReader(DocumentReader):
+    """Reader for PDF files"""
+    def read(self, file_path: str) -> str:
+        full_text = []
+        
+        with pdfplumber.open(file_path) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    # Basic cleanup and formatting
+                    # Split into paragraphs based on double newlines
+                    paragraphs = text.split('\n\n')
+                    for paragraph in paragraphs:
+                        # Clean up extra whitespace
+                        cleaned = re.sub(r'\s+', ' ', paragraph).strip()
+                        if cleaned:
+                            # Try to detect headers (this is a basic heuristic)
+                            # You might want to adjust this based on your specific needs
+                            if len(cleaned) < 100 and cleaned.isupper():
+                                full_text.append(f"## {cleaned}")
+                            else:
+                                full_text.append(cleaned)
+        
+        return '\n\n'.join(full_text)
+
+
 class MarkdownWriter(DocumentWriter):
     """Writer for Markdown files."""
     
@@ -95,7 +123,8 @@ class DocumentConverter:
     
     def __init__(self):
         self.readers: Dict[str, Type[DocumentReader]] = {
-            '.docx': DocxReader
+            '.docx': DocxReader,
+            '.pdf': PdfReader
         }
         self.writers: Dict[str, Type[DocumentWriter]] = {
             '.md': MarkdownWriter
