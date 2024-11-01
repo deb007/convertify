@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Dict, Type
+from typing import Dict, Type, List, Tuple
 
 import docx
 from docx.document import Document
@@ -10,7 +10,22 @@ from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 import pdfplumber
 import re
+from dataclasses import dataclass
+from collections import defaultdict
 
+@dataclass
+class TextElement:
+    """Represents a text element with its formatting properties"""
+    text: str
+    font_size: float = 0
+    font_name: str = ""
+    bold: bool = False
+    italic: bool = False
+    is_header: bool = False
+    top: float = 0
+    left: float = 0
+    width: float = 0
+    height: float = 0
 
 class DocumentReader(ABC):
     """Abstract base class for document readers."""
@@ -82,28 +97,136 @@ class DocxReader(DocumentReader):
 
 class PdfReader(DocumentReader):
     """Reader for PDF files"""
+    
+    def __init__(self):
+        self.font_sizes = []
+        self.header_sizes = set()
+    
+    def _analyze_font_sizes(self, pages):
+        """Analyze font sizes to determine header levels"""
+        sizes = defaultdict(int)
+        for page in pages:
+            chars = page.chars
+            for char in chars:
+                if char['size'] is not None:
+                    sizes[char['size']] += 1
+        
+        # Get sorted unique font sizes
+        unique_sizes = sorted(sizes.keys(), reverse=True)
+        
+        # Consider the top 3 largest sizes as potential headers
+        self.header_sizes = set(unique_sizes[:3])
+        self.font_sizes = unique_sizes
+    
+    def _get_header_level(self, font_size: float) -> int:
+        """Determine header level based on font size"""
+        if font_size in self.header_sizes:
+            return self.font_sizes.index(font_size) + 1
+        return 0
+    
+    def _extract_text_elements(self, page) -> List[TextElement]:
+        """Extract text elements with formatting from a page"""
+        elements = []
+        
+        # First, get all text with position and formatting
+        words = page.extract_words(
+            keep_blank_chars=True,
+            extra_attrs=['fontname', 'size', 'stroking_color', 'non_stroking_color']
+        )
+        
+        current_line_y = None
+        current_line_elements = []
+        
+        for word in words:
+            # Create text element
+            element = TextElement(
+                text=word['text'],
+                font_size=word['size'],
+                font_name=word['fontname'],
+                bold='Bold' in word['fontname'] or word.get('stroking_color') == (0, 0, 0),
+                italic='Italic' in word['fontname'],
+                top=word['top'],
+                left=word['x0'],
+                width=word['x1'] - word['x0'],
+                height=word['bottom'] - word['top']
+            )
+            
+            # Check if this is a header based on font size
+            element.is_header = element.font_size in self.header_sizes
+            
+            # Handle line breaks
+            if current_line_y is None:
+                current_line_y = element.top
+            
+            # If vertical position difference is significant, treat as new line
+            if abs(element.top - current_line_y) > element.height * 0.5:
+                if current_line_elements:
+                    elements.extend(current_line_elements)
+                    elements.append(TextElement('\n', 0))
+                current_line_elements = []
+                current_line_y = element.top
+            
+            current_line_elements.append(element)
+        
+        # Add last line
+        if current_line_elements:
+            elements.extend(current_line_elements)
+        
+        return elements
+    
+    def _elements_to_markdown(self, elements: List[TextElement]) -> str:
+        """Convert text elements to markdown"""
+        markdown_lines = []
+        current_line = []
+        
+        for element in elements:
+            if element.text == '\n':
+                if current_line:
+                    line = ''.join(current_line)
+                    if line.strip():
+                        markdown_lines.append(line)
+                    current_line = []
+                continue
+            
+            text = element.text
+            
+            # Apply formatting
+            if element.is_header:
+                level = self._get_header_level(element.font_size)
+                text = f"{'#' * level} {text}"
+            else:
+                if element.bold and element.italic:
+                    text = f"***{text}***"
+                elif element.bold:
+                    text = f"**{text}**"
+                elif element.italic:
+                    text = f"*{text}*"
+            
+            current_line.append(text)
+        
+        # Add any remaining line
+        if current_line:
+            line = ''.join(current_line)
+            if line.strip():
+                markdown_lines.append(line)
+        
+        return '\n\n'.join(markdown_lines)
+    
     def read(self, file_path: str) -> str:
-        full_text = []
-        
         with pdfplumber.open(file_path) as pdf:
+            # First pass: analyze font sizes
+            self._analyze_font_sizes(pdf.pages)
+            
+            # Second pass: extract and format text
+            all_elements = []
             for page in pdf.pages:
-                text = page.extract_text()
-                if text:
-                    # Basic cleanup and formatting
-                    # Split into paragraphs based on double newlines
-                    paragraphs = text.split('\n\n')
-                    for paragraph in paragraphs:
-                        # Clean up extra whitespace
-                        cleaned = re.sub(r'\s+', ' ', paragraph).strip()
-                        if cleaned:
-                            # Try to detect headers (this is a basic heuristic)
-                            # You might want to adjust this based on your specific needs
-                            if len(cleaned) < 100 and cleaned.isupper():
-                                full_text.append(f"## {cleaned}")
-                            else:
-                                full_text.append(cleaned)
-        
-        return '\n\n'.join(full_text)
+                elements = self._extract_text_elements(page)
+                all_elements.extend(elements)
+                # Add page break if not last page
+                if page.page_number < len(pdf.pages):
+                    all_elements.append(TextElement('\n', 0))
+            
+            return self._elements_to_markdown(all_elements)
 
 
 class MarkdownWriter(DocumentWriter):
